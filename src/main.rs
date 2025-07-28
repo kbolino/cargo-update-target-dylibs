@@ -11,7 +11,7 @@ fn main() -> Result<()> {
         .iter()
         .any(|arg| arg == "-h" || arg == "-?" || arg == "-help" || arg == "--help");
     if is_help {
-        println!("USAGE: cargo update-target-dylibs [--help|--release]");
+        println!("USAGE: cargo update-target-dylibs [--verbose] [--release]");
         println!();
         println!("Copies dynamic libraries built for dependencies into the target directory.");
         println!("Cargo workspaces are supported, but a particular package must be specified;");
@@ -22,10 +22,17 @@ fn main() -> Result<()> {
         println!("passed through to `cargo build`.");
         return Ok(());
     }
+    let is_release = args.iter().any(|arg| arg == "--release");
+    let is_verbose = args.iter().any(|arg| arg == "--verbose");
+
     let mut cmd = Command::new("cargo");
     cmd.arg("pkgid");
     let pkg_id = get_cmd(cmd).context("running `cargo pkgid`")?;
-    let is_release = std::env::args_os().any(|arg| arg == "--release");
+    if is_verbose {
+        println!("this package = {:?}", &pkg_id);
+        println!("release mode = {:?}", is_release);
+    }
+
     let mut cmd = Command::new("cargo");
     cmd.arg("build");
     for key in ["CARGO_ARGS", "CARGO_BUILD_ARGS"] {
@@ -37,7 +44,11 @@ fn main() -> Result<()> {
         cmd.arg("--release");
     }
     cmd.args(["--quiet", "--message-format", "json"]);
+    if is_verbose {
+        println!("cargo args = {:?}", cmd.get_args());
+    }
     let build_messages = get_cmd(cmd).context("running `cargo build`")?;
+
     let mut pkg_message = None;
     let mut libraries = Vec::new();
     for (i, line) in build_messages.lines().enumerate() {
@@ -69,12 +80,17 @@ fn main() -> Result<()> {
         );
         let paths = linked_paths.into_iter().collect::<HashSet<_>>();
         for name in linked_libs.into_iter() {
-            libraries.push(Library {
+            let library = Library {
                 name,
                 paths: paths.clone(),
-            });
+            };
+            if is_verbose {
+                println!("library found: {:?}", library);
+            }
+            libraries.push(library);
         }
     }
+
     let pkg_message = pkg_message.ok_or(anyhow!(
         "no 'compiler-artifact' message found for package '{}'",
         pkg_id
@@ -96,20 +112,32 @@ fn main() -> Result<()> {
     let target_path = target_path
         .parent()
         .ok_or(anyhow!("can't find parent path for package '{}'", pkg_id))?;
+    if is_verbose {
+        println!("target path = {:?}", target_path.display());
+    }
+
     for Library { name, paths } in libraries {
         let lib_name = format!("{}{}{}", DYLIB_PREFIX, name, DYLIB_SUFFIX);
+        if is_verbose {
+            println!("library name = {:?}", lib_name);
+        }
         for path in paths.into_iter() {
-            let src_path = PathBuf::from(path);
-            let src_path = src_path
-                .parent()
-                .ok_or(anyhow!("no parent path for library '{}'", &lib_name))?;
-            let src_path = src_path.join("bin").join(&lib_name);
+            let lib_path = PathBuf::from(path);
+            let mut src_path = lib_path.join(&lib_name);
             if !src_path.exists() {
-                continue;
+                let parent_path = lib_path
+                    .parent()
+                    .ok_or(anyhow!("no parent path for library '{}'", &lib_name))?;
+                let alt_src_path = parent_path.join("bin").join(&lib_name);
+                if !alt_src_path.exists() {
+                    continue;
+                }
+                src_path = alt_src_path
             }
             let dst_path = PathBuf::from(target_path).join(&lib_name);
             copy(&src_path, &dst_path).context(format!("copying library '{}'", lib_name))?;
             println!("{} -> {}", src_path.display(), dst_path.display());
+            break;
         }
     }
     Ok(())
@@ -125,6 +153,7 @@ struct BuildMessage {
     filenames: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
 struct Library {
     name: String,
     paths: HashSet<String>,
