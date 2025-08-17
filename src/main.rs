@@ -1,8 +1,9 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::Deserialize;
 use std::collections::HashSet;
-use std::fs::copy;
-use std::path::PathBuf;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() -> Result<()> {
@@ -111,7 +112,8 @@ fn main() -> Result<()> {
     });
     let target_path = target_path
         .parent()
-        .ok_or(anyhow!("can't find parent path for package '{}'", pkg_id))?;
+        .ok_or(anyhow!("can't find parent path for package '{}'", pkg_id))?
+        .join("deps");
     if is_verbose {
         println!("target path = {:?}", target_path.display());
     }
@@ -134,11 +136,55 @@ fn main() -> Result<()> {
                 }
                 src_path = alt_src_path
             }
-            let dst_path = PathBuf::from(target_path).join(&lib_name);
-            copy(&src_path, &dst_path).context(format!("copying library '{}'", lib_name))?;
-            println!("{} -> {}", src_path.display(), dst_path.display());
+            copy(&src_path, &target_path)
+                .context(format!("copying library '{}'", src_path.display()))?;
             break;
         }
+    }
+    Ok(())
+}
+
+fn copy(src_path: impl AsRef<Path>, dst_dir: impl AsRef<Path>) -> Result<()> {
+    let src_path = src_path.as_ref();
+    let dst_dir = dst_dir.as_ref();
+    let base_name = src_path
+        .file_name()
+        .ok_or(anyhow!("no base name for source path"))?;
+    let dst_path = dst_dir.join(base_name);
+    if let Err(err) = fs::remove_file(&dst_path)
+        && err.kind() != ErrorKind::NotFound
+    {
+        return Err(err).context("removing existing file");
+    }
+    if src_path.is_symlink() {
+        let mut link_target = src_path.read_link().context("reading symlink")?;
+        if !link_target.is_absolute() {
+            link_target = src_path
+                .parent()
+                .ok_or(anyhow!("no parent for source path"))?
+                .join(link_target);
+        }
+        copy(&link_target, dst_dir).context(format!(
+            "copying symlink target '{}'",
+            link_target.display()
+        ))?;
+        let target_base_name = link_target
+            .file_name()
+            .ok_or(anyhow!("no base name for link target"))?;
+        println!(
+            "link {} -> {}",
+            dst_path.display(),
+            target_base_name.display()
+        );
+        // the behavior of fs::soft_link is actually what we want, so ignore
+        // the warning
+        #[allow(deprecated)]
+        fs::soft_link(target_base_name, dst_path).context("creating symbolic link")?;
+    } else if src_path.is_dir() {
+        bail!("source path is a directory");
+    } else {
+        println!("copy {} -> {}", src_path.display(), dst_path.display());
+        fs::copy(src_path, dst_path).context("copying regular file")?;
     }
     Ok(())
 }
